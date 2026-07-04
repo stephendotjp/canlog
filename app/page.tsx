@@ -6,15 +6,40 @@ import {
   Check,
   X,
   Flame,
+  Snowflake,
   Coffee,
   ChevronLeft,
   ChevronRight,
   Loader2,
   Trash2,
+  History as HistoryIcon,
+  Sparkles,
+  Zap,
+  Wallet,
+  Star,
+  Droplet,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, Cell } from "recharts";
 import { getDeviceId } from "@/lib/deviceId";
 import type { Entry } from "@/lib/types";
+
+// Kinetic Utility palette (Stitch design direction).
+const C = {
+  bg: "#faf9fe",
+  card: "#ffffff",
+  cell: "#eeedf3",
+  border: "#e6e5ec",
+  text: "#1a1b1f",
+  muted: "#6e6a75",
+  primary: "#bc000a",
+  primaryFixed: "#ffdad5",
+  blue: "#0058bc",
+  blueFixed: "#d8e2ff",
+  hotText: "#a33a0c",
+  hotBg: "#ffe1cc",
+  coldText: "#0058bc",
+  coldBg: "#d8e2ff",
+};
 
 const QUICK_ITEMS = [
   { name: "BOSS Rainbow Mountain", brand: "Suntory", size_ml: 185, caffeine_mg: 90, calories: 30 },
@@ -26,6 +51,7 @@ const QUICK_ITEMS = [
 ];
 
 type Num = number | string;
+type Temp = "hot" | "cold" | null;
 
 interface Draft {
   jan: string | null;
@@ -43,6 +69,7 @@ interface Draft {
   confidence?: string;
   notes?: string;
   price_yen: Num;
+  temperature: Temp;
   previewUrl?: string | null;
   fromCache?: boolean;
 }
@@ -57,6 +84,17 @@ function monthKey(iso: string) {
 function fmtMonthLabel(key: string) {
   const [y, m] = key.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+// Human day heading (Today / Yesterday / "Mon 3") for the grouped history list.
+function dayHeading(iso: string) {
+  const d = new Date(iso);
+  const now = new Date();
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOf(now) - startOf(d)) / 86400000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
 }
 
 // Downscale the photo before sending. iPhone photos are ~3000-4000px; the model
@@ -103,6 +141,7 @@ function normalizeEntry(e: Entry): Entry {
     sodium_mg: Number(e.sodium_mg) || 0,
     caffeine_mg: Number(e.caffeine_mg) || 0,
     price_yen: Number(e.price_yen) || 0,
+    temperature: e.temperature === "hot" || e.temperature === "cold" ? e.temperature : null,
   };
 }
 
@@ -183,6 +222,7 @@ export default function CanLog() {
             previewUrl,
             fromCache: true,
             price_yen: "",
+            temperature: null,
             notes: "Loaded from saved products — no scan needed.",
           });
           return;
@@ -193,7 +233,7 @@ export default function CanLog() {
       setStage("label");
       const label = await postJson("/api/scan/label", { imageBase64: base64, mediaType });
       if (label?.error) throw new Error(label.error);
-      setDraft({ ...label, jan, previewUrl, fromCache: false, price_yen: "" });
+      setDraft({ ...label, jan, previewUrl, fromCache: false, price_yen: "", temperature: null });
     } catch (e) {
       console.error(e);
       setAnalyzeError("Couldn't read that label clearly. You can enter it manually below.");
@@ -211,6 +251,7 @@ export default function CanLog() {
         confidence: "low",
         notes: "",
         price_yen: "",
+        temperature: null,
         jan: null,
         previewUrl,
       });
@@ -266,6 +307,7 @@ export default function CanLog() {
       fat_g: prefill?.fat_g ?? 0,
       sodium_mg: prefill?.sodium_mg ?? 0,
       price_yen: prefill?.price_yen ?? "",
+      temperature: null,
       caffeine_is_estimate: true,
       confidence: "manual",
       notes: "",
@@ -313,6 +355,7 @@ export default function CanLog() {
         caffeine_mg: draft.caffeine_mg,
         caffeine_is_estimate: !!draft.caffeine_is_estimate,
         price_yen: draft.price_yen,
+        temperature: draft.temperature,
         image_url,
         confidence: draft.confidence || "manual",
       });
@@ -347,16 +390,15 @@ export default function CanLog() {
   });
   const favoriteBrand = Object.entries(brandCounts).sort((a, b) => b[1] - a[1])[0];
 
-  const daysInMonth = (() => {
-    const [y, m] = wrappedMonth.split("-").map(Number);
-    return new Date(y, m, 0).getDate();
-  })();
-  const dayData = Array.from({ length: daysInMonth }, (_, i) => {
-    const day = i + 1;
-    const cups = monthEntries.filter((e) => new Date(e.timestamp).getDate() === day).length;
-    return { day, cups };
+  // Weekly rhythm: cups per weekday (Mon–Sun), matching the mockup.
+  const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const weekData = WEEKDAYS.map((label, i) => {
+    // JS getDay(): 0=Sun..6=Sat. Map Mon..Sun -> 1..6,0.
+    const jsDay = (i + 1) % 7;
+    const cups = monthEntries.filter((e) => new Date(e.timestamp).getDay() === jsDay).length;
+    return { label, cups };
   });
-  const peakDay = dayData.reduce((max, d) => (d.cups > max.cups ? d : max), { day: 0, cups: 0 });
+  const peakWeekday = weekData.reduce((max, d) => (d.cups > max.cups ? d : max), { label: "", cups: 0 });
 
   const shiftMonth = (dir: number) => {
     const [y, m] = wrappedMonth.split("-").map(Number);
@@ -367,149 +409,188 @@ export default function CanLog() {
   const history = [...entries].sort(
     (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
   );
+  // Group the sorted history into day sections (Today / Yesterday / date).
+  const historyGroups: { heading: string; items: Entry[] }[] = [];
+  history.forEach((e) => {
+    const heading = dayHeading(e.timestamp);
+    const last = historyGroups[historyGroups.length - 1];
+    if (last && last.heading === heading) last.items.push(e);
+    else historyGroups.push({ heading, items: [e] });
+  });
+
+  const openCamera = () => fileInputRef.current?.click();
 
   return (
-    <div
-      style={{ fontFamily: "'Noto Sans JP', sans-serif", background: "#1B2430", minHeight: "100%", color: "#F1E8D8" }}
-      className="w-full min-h-screen flex flex-col"
-    >
-      {/* Header */}
-      <div className="px-5 pt-6 pb-4 flex items-center justify-between" style={{ borderBottom: "1px solid #333d4d" }}>
-        <div className="flex items-center gap-2">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: "#E8A33D" }}>
-            <Coffee size={18} color="#1B2430" strokeWidth={2.5} />
-          </div>
-          <div>
-            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 18, letterSpacing: "-0.02em" }}>
-              CANLOG
-            </div>
-            <div style={{ fontSize: 10, color: "#8B95A1", letterSpacing: "0.08em" }}>CAN COFFEE LOG</div>
-          </div>
-        </div>
-        <div className="flex gap-1" style={{ background: "#252e3d", borderRadius: 10, padding: 3 }}>
-          {([
-            ["log", "Log"],
-            ["history", "History"],
-            ["wrapped", "Wrapped"],
-          ] as const).map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              style={{
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontSize: 12,
-                fontWeight: 700,
-                padding: "6px 12px",
-                borderRadius: 7,
-                background: tab === key ? "#E8A33D" : "transparent",
-                color: tab === key ? "#1B2430" : "#8B95A1",
-                transition: "all 0.15s",
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
+    <div className="w-full min-h-screen flex flex-col" style={{ background: C.bg, color: C.text }}>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display: "none" }}
+        onChange={(e) => handleFile(e.target.files?.[0])}
+      />
 
-      <div className="flex-1 px-5 py-5" style={{ maxWidth: 560, margin: "0 auto", width: "100%" }}>
+      {/* Top app bar */}
+      <header
+        className="sticky top-0 z-40 flex items-center justify-between px-5"
+        style={{ height: 56, background: C.bg, borderBottom: `1px solid ${C.border}` }}
+      >
+        <div className="flex items-center gap-2">
+          <Coffee size={22} color={C.primary} strokeWidth={2.5} />
+          <span style={{ fontWeight: 800, fontSize: 20, letterSpacing: "-0.03em", color: C.primary }}>
+            CANLOG <span style={{ opacity: 0.6 }}>//</span> 缶ログ
+          </span>
+        </div>
+      </header>
+
+      <main className="flex-1 w-full" style={{ maxWidth: 560, margin: "0 auto", padding: "20px 20px 96px" }}>
         {/* LOG TAB */}
         {tab === "log" && (
           <div>
             {!draft && (
-              <div>
-                <div
-                  onClick={() => fileInputRef.current?.click()}
-                  style={{ border: "2px dashed #465065", borderRadius: 16, padding: "36px 20px", textAlign: "center", cursor: "pointer", background: "#212a38" }}
+              <div className="flex flex-col gap-6">
+                {/* Viewfinder tap-target */}
+                <button
+                  onClick={openCamera}
+                  className="relative w-full overflow-hidden"
+                  style={{
+                    aspectRatio: "4 / 5",
+                    background: "#2f3034",
+                    borderRadius: 16,
+                    border: `1px solid ${C.border}`,
+                  }}
                 >
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    style={{ display: "none" }}
-                    onChange={(e) => handleFile(e.target.files?.[0])}
-                  />
-                  <div className="mx-auto mb-3 flex items-center justify-center" style={{ width: 52, height: 52, borderRadius: "50%", background: "#2d3849" }}>
-                    <Camera size={24} color="#E8A33D" />
+                  {analyzing ? (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ color: "#f1f0f5" }}>
+                      {photoPreview && (
+                        <img
+                          src={photoPreview}
+                          alt="preview"
+                          style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 12, opacity: 0.85 }}
+                        />
+                      )}
+                      <div className="flex items-center gap-2" style={{ fontSize: 13 }}>
+                        <Loader2 size={16} className="animate-spin" />
+                        {stage === "barcode" && "Reading barcode…"}
+                        {stage === "label" && "New product — reading label…"}
+                        {stage === "cache-hit" && "Found it in saved products…"}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center p-8">
+                      <div className="relative flex items-center justify-center" style={{ width: "100%", maxWidth: 260, aspectRatio: "1 / 1" }}>
+                        <Bracket pos="tl" />
+                        <Bracket pos="tr" />
+                        <Bracket pos="bl" />
+                        <Bracket pos="br" />
+                        <div className="canlog-scanline" />
+                        <div
+                          className="flex flex-col items-center gap-1"
+                          style={{ background: "rgba(0,0,0,0.4)", borderRadius: 999, padding: "8px 16px", backdropFilter: "blur(6px)" }}
+                        >
+                          <span style={{ color: "#fff", fontSize: 12, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                            Align barcode to scan
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div className="absolute" style={{ left: 0, right: 0, bottom: 12, textAlign: "center", color: "rgba(255,255,255,0.75)", fontSize: 12 }}>
+                    Tap to snap the back of the can
                   </div>
-                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 15 }}>Snap the BACK of the can</div>
-                  <div style={{ fontSize: 12.5, color: "#8B95A1", marginTop: 4 }}>Get the barcode and nutrition table in frame</div>
-                </div>
+                </button>
 
-                {analyzing && (
-                  <div className="flex items-center gap-2 justify-center mt-4" style={{ color: "#8B95A1", fontSize: 13 }}>
-                    <Loader2 size={16} className="animate-spin" />
-                    {stage === "barcode" && "Reading barcode…"}
-                    {stage === "label" && "New product — reading nutrition label…"}
-                    {stage === "cache-hit" && "Found it in saved products…"}
+                {/* Quick Add */}
+                <section>
+                  <div className="flex items-end justify-between mb-3">
+                    <h2 style={{ fontSize: 20, fontWeight: 700 }}>Quick Add</h2>
+                    <span style={{ fontSize: 12, color: C.muted }}>No photo? Tap one</span>
                   </div>
-                )}
-                {photoPreview && analyzing && (
-                  <img src={photoPreview} alt="preview" style={{ width: 96, height: 96, objectFit: "cover", borderRadius: 10, margin: "12px auto 0", display: "block" }} />
-                )}
-
-                <div className="mt-6">
-                  <div style={{ fontSize: 11, color: "#8B95A1", letterSpacing: "0.06em", marginBottom: 8 }}>NO PHOTO? QUICK-ADD A COMMON ONE</div>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="flex gap-3 overflow-x-auto pb-1 canlog-noscroll">
                     {QUICK_ITEMS.map((item) => (
                       <button
                         key={item.name}
                         onClick={() => startManual(item)}
-                        style={{ background: "#212a38", border: "1px solid #333d4d", borderRadius: 10, padding: "10px 12px", textAlign: "left" }}
+                        className="flex flex-col items-center gap-2 shrink-0"
+                        style={{ width: 72 }}
                       >
-                        <div style={{ fontSize: 12.5, fontWeight: 500 }}>{item.name}</div>
-                        <div style={{ fontSize: 10.5, color: "#8B95A1", marginTop: 2 }}>{item.brand} · {item.size_ml}ml</div>
+                        <div
+                          className="flex items-center justify-center"
+                          style={{ width: 64, height: 64, borderRadius: "50%", background: C.card, border: `1px solid ${C.border}`, boxShadow: "0 1px 2px rgba(0,0,0,0.04)" }}
+                        >
+                          <span style={{ fontSize: 22, fontWeight: 800, color: C.primary }}>
+                            {(item.brand[0] || "?").toUpperCase()}
+                          </span>
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: C.muted, textAlign: "center", lineHeight: 1.2 }}>
+                          {item.brand}
+                        </span>
                       </button>
                     ))}
                   </div>
-                  <button onClick={() => startManual(null)} style={{ fontSize: 12.5, color: "#E8A33D", marginTop: 10, fontWeight: 500 }}>
-                    + Enter something else manually
+                </section>
+
+                {/* Actions */}
+                <section className="flex flex-col gap-3">
+                  <button
+                    onClick={openCamera}
+                    className="w-full flex items-center justify-center gap-2"
+                    style={{ height: 52, background: C.primary, color: "#fff", borderRadius: 14, fontSize: 16, fontWeight: 700, boxShadow: "0 4px 12px rgba(188,0,10,0.18)" }}
+                  >
+                    <Camera size={20} /> Log Instantly
                   </button>
-                </div>
+                  <button
+                    onClick={() => startManual(null)}
+                    className="w-full flex items-center justify-center gap-2"
+                    style={{ height: 52, background: C.card, color: C.text, border: `1px solid ${C.border}`, borderRadius: 14, fontSize: 14, fontWeight: 700 }}
+                  >
+                    <Coffee size={18} color={C.primary} /> Manual Entry
+                  </button>
+                </section>
               </div>
             )}
 
             {/* Draft confirm card */}
             {draft && (
-              <div style={{ background: "#F1E8D8", color: "#1B2430", borderRadius: 16, padding: 20 }}>
+              <div style={{ background: C.card, borderRadius: 20, border: `1px solid ${C.border}`, padding: 20, boxShadow: "0 4px 16px rgba(0,0,0,0.05)" }}>
                 <div className="flex items-center justify-between mb-3">
-                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 14 }}>
+                  <div style={{ fontWeight: 700, fontSize: 18 }}>
                     {manualMode ? "Add manually" : "Does this look right?"}
                   </div>
                   <div className="flex gap-1.5">
                     {draft.fromCache && (
-                      <span style={{ fontSize: 10, background: "#5B3A29", color: "#F1E8D8", padding: "2px 8px", borderRadius: 6, fontWeight: 700 }}>FROM CACHE</span>
+                      <span style={{ fontSize: 10, background: C.blueFixed, color: C.blue, padding: "3px 9px", borderRadius: 999, fontWeight: 700 }}>SAVED</span>
                     )}
                     {draft.confidence === "low" && !manualMode && (
-                      <span style={{ fontSize: 10, background: "#C1432B", color: "#F1E8D8", padding: "2px 8px", borderRadius: 6, fontWeight: 700 }}>LOW CONFIDENCE</span>
+                      <span style={{ fontSize: 10, background: C.primaryFixed, color: C.primary, padding: "3px 9px", borderRadius: 999, fontWeight: 700 }}>LOW CONFIDENCE</span>
                     )}
                   </div>
                 </div>
 
-                {analyzeError && <div style={{ fontSize: 12, color: "#C1432B", marginBottom: 10 }}>{analyzeError}</div>}
+                {analyzeError && <div style={{ fontSize: 12, color: C.primary, marginBottom: 10 }}>{analyzeError}</div>}
                 {draft.fromCache && (
-                  <button onClick={forceRescan} style={{ fontSize: 11, color: "#5B3A29", textDecoration: "underline", marginBottom: 10, display: "block" }}>
-                    Not right? Ignore cache and rescan the photo
+                  <button onClick={forceRescan} style={{ fontSize: 11.5, color: C.blue, textDecoration: "underline", marginBottom: 10, display: "block" }}>
+                    Not right? Ignore saved data and rescan the photo
                   </button>
                 )}
                 {draft.notes && !manualMode && (
-                  <details style={{ fontSize: 11, color: "#8B95A1", marginBottom: 10 }}>
+                  <details style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>
                     <summary style={{ cursor: "pointer" }}>Scan details</summary>
                     <div style={{ marginTop: 4, fontStyle: "italic" }}>{draft.notes}</div>
                   </details>
                 )}
 
                 {draft.previewUrl && (
-                  <img src={draft.previewUrl} alt="scanned" style={{ width: "100%", maxHeight: 140, objectFit: "cover", borderRadius: 10, marginBottom: 12 }} />
+                  <img src={draft.previewUrl} alt="scanned" style={{ width: "100%", maxHeight: 160, objectFit: "cover", borderRadius: 12, marginBottom: 12 }} />
                 )}
 
                 {draft.jan && (
-                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#8B95A1", marginBottom: 10 }}>JAN {draft.jan}</div>
+                  <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12, letterSpacing: "0.03em" }}>JAN {draft.jan}</div>
                 )}
 
                 {draft.name_is_generic && !manualMode && (
-                  <div style={{ fontSize: 11.5, background: "#5B3A29", color: "#F1E8D8", borderRadius: 8, padding: "8px 10px", marginBottom: 10 }}>
+                  <div style={{ fontSize: 11.5, background: C.cell, color: C.text, borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
                     <div style={{ marginBottom: draft.jan ? 8 : 0 }}>
                       The label only shows &quot;{draft.name}&quot; — that&apos;s the food-category label, not the product name.
                     </div>
@@ -517,15 +598,38 @@ export default function CanLog() {
                       <button
                         onClick={tryLookupName}
                         disabled={lookingUpName}
-                        style={{ background: "#E8A33D", color: "#1B2430", fontWeight: 700, fontSize: 11, borderRadius: 6, padding: "5px 10px", display: "inline-flex", alignItems: "center", gap: 5 }}
+                        style={{ background: C.primary, color: "#fff", fontWeight: 700, fontSize: 11, borderRadius: 8, padding: "6px 11px", display: "inline-flex", alignItems: "center", gap: 5 }}
                       >
                         {lookingUpName ? <Loader2 size={12} className="animate-spin" /> : null}
                         {lookingUpName ? "Searching…" : "Look up name online (uses a search)"}
                       </button>
                     )}
-                    {lookupError && <div style={{ marginTop: 6, color: "#F1C08A" }}>{lookupError}</div>}
+                    {lookupError && <div style={{ marginTop: 6, color: C.primary }}>{lookupError}</div>}
                   </div>
                 )}
+
+                {/* Hot / Cold toggle */}
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: "0.05em", marginBottom: 6 }}>SERVED</div>
+                  <div className="flex gap-2">
+                    <TempButton
+                      active={draft.temperature === "hot"}
+                      onClick={() => setDraft({ ...draft, temperature: draft.temperature === "hot" ? null : "hot" })}
+                      icon={<Flame size={15} />}
+                      label="Hot"
+                      color={C.hotText}
+                      bg={C.hotBg}
+                    />
+                    <TempButton
+                      active={draft.temperature === "cold"}
+                      onClick={() => setDraft({ ...draft, temperature: draft.temperature === "cold" ? null : "cold" })}
+                      icon={<Snowflake size={15} />}
+                      label="Cold"
+                      color={C.coldText}
+                      bg={C.coldBg}
+                    />
+                  </div>
+                </div>
 
                 <div className="grid grid-cols-2 gap-3 mb-2">
                   <Field label="Brand" value={draft.brand} onChange={(v) => setDraft({ ...draft, brand: v })} />
@@ -559,16 +663,16 @@ export default function CanLog() {
                     onClick={saveDraft}
                     disabled={saving}
                     className="flex-1 flex items-center justify-center gap-1.5"
-                    style={{ background: "#1B2430", color: "#F1E8D8", borderRadius: 10, padding: "10px 0", fontWeight: 700, fontSize: 13, opacity: saving ? 0.7 : 1 }}
+                    style={{ background: C.primary, color: "#fff", borderRadius: 12, padding: "12px 0", fontWeight: 700, fontSize: 14, opacity: saving ? 0.7 : 1 }}
                   >
-                    {saving ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} {saving ? "Saving…" : "Log it"}
+                    {saving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} {saving ? "Saving…" : "Confirm & Log"}
                   </button>
                   <button
                     onClick={resetDraft}
                     className="flex items-center justify-center gap-1.5"
-                    style={{ background: "transparent", border: "1px solid #5B3A29", color: "#5B3A29", borderRadius: 10, padding: "10px 16px", fontWeight: 700, fontSize: 13 }}
+                    style={{ background: C.card, border: `1px solid ${C.border}`, color: C.text, borderRadius: 12, padding: "12px 18px", fontWeight: 700, fontSize: 14 }}
                   >
-                    <X size={15} /> Cancel
+                    <X size={16} /> Retake
                   </button>
                 </div>
               </div>
@@ -579,114 +683,239 @@ export default function CanLog() {
         {/* HISTORY TAB */}
         {tab === "history" && (
           <div>
-            {history.length === 0 && <EmptyState text="Nothing logged yet. Go scan a can." />}
-            <div className="flex flex-col gap-2">
-              {history.map((e) => (
-                <div key={e.id} className="flex items-center gap-3" style={{ background: "#212a38", borderRadius: 12, padding: 10 }}>
-                  {e.image_url ? (
-                    <img src={e.image_url} alt="" style={{ width: 44, height: 44, borderRadius: 8, objectFit: "cover" }} />
-                  ) : (
-                    <div style={{ width: 44, height: 44, borderRadius: 8, background: "#2d3849", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <Coffee size={18} color="#E8A33D" />
-                    </div>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{e.name}</div>
-                    <div style={{ fontSize: 11, color: "#8B95A1" }}>
-                      {e.brand} · {e.size_ml}ml · {e.caffeine_mg}mg caffeine
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 10.5, color: "#8B95A1", textAlign: "right", marginRight: 4 }}>
-                    <div>{new Date(e.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</div>
-                    {e.price_yen > 0 && <div style={{ fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>¥{e.price_yen}</div>}
-                  </div>
-                  <button onClick={() => deleteEntry(e.id)} style={{ color: "#8B95A1" }}>
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-              ))}
+            <div className="flex items-center justify-between mb-5">
+              <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.02em" }}>History</h1>
+              <span style={{ fontSize: 12, fontWeight: 700, color: C.muted, background: C.cell, padding: "5px 12px", borderRadius: 999 }}>
+                {history.length} Total
+              </span>
             </div>
+
+            {history.length === 0 && <EmptyState text="Nothing logged yet. Go scan a can." />}
+
+            {historyGroups.map((group) => (
+              <div key={group.heading} className="mb-5">
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", color: C.muted, textTransform: "uppercase", marginBottom: 8 }}>
+                  {group.heading}
+                </div>
+                <div className="flex flex-col gap-2.5">
+                  {group.items.map((e) => (
+                    <div
+                      key={e.id}
+                      className="flex items-center gap-3"
+                      style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.border}`, padding: 12 }}
+                    >
+                      {e.image_url ? (
+                        <img src={e.image_url} alt="" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover" }} />
+                      ) : (
+                        <div style={{ width: 52, height: 52, borderRadius: 10, background: C.cell, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <Coffee size={20} color={C.primary} />
+                        </div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div style={{ fontSize: 12, fontWeight: 700, color: C.blue, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {e.brand}
+                        </div>
+                        <div style={{ fontSize: 15, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {e.name}
+                        </div>
+                        <div className="flex items-center gap-2" style={{ marginTop: 3 }}>
+                          {e.temperature && <TempChip temp={e.temperature} />}
+                          {e.price_yen > 0 && (
+                            <span style={{ fontSize: 12.5, fontWeight: 700, color: C.primary }}>¥{e.price_yen}</span>
+                          )}
+                          <span style={{ fontSize: 11.5, color: C.muted }}>{e.size_ml}ml · {e.caffeine_mg}mg</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end gap-2">
+                        <span style={{ fontSize: 11.5, color: C.muted }}>
+                          {new Date(e.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                        <button onClick={() => deleteEntry(e.id)} style={{ color: C.muted }}>
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
         {/* WRAPPED TAB */}
         {tab === "wrapped" && (
           <div>
-            <div className="flex items-center justify-between mb-4">
-              <button onClick={() => shiftMonth(-1)} style={{ color: "#8B95A1" }}><ChevronLeft size={20} /></button>
-              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 14 }}>{fmtMonthLabel(wrappedMonth)}</div>
-              <button onClick={() => shiftMonth(1)} style={{ color: "#8B95A1" }}><ChevronRight size={20} /></button>
+            <div className="flex items-center justify-center gap-3 mb-4">
+              <button onClick={() => shiftMonth(-1)} style={{ color: C.muted }}><ChevronLeft size={20} /></button>
+              <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: C.primary, background: C.primaryFixed, padding: "5px 14px", borderRadius: 999 }}>
+                {fmtMonthLabel(wrappedMonth)}
+              </span>
+              <button onClick={() => shiftMonth(1)} style={{ color: C.muted }}><ChevronRight size={20} /></button>
             </div>
+            <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.02em", textAlign: "center", marginBottom: 20 }}>
+              Your Coffee Story
+            </h1>
 
             {totalCups === 0 ? (
               <EmptyState text="No coffee logged this month yet." />
             ) : (
-              <div
-                style={{
-                  background: "linear-gradient(180deg, #F1E8D8 0%, #ECE0CB 100%)",
-                  borderRadius: 20,
-                  padding: "24px 20px",
-                  color: "#1B2430",
-                  boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.05), 0 8px 24px rgba(0,0,0,0.25)",
-                  position: "relative",
-                  overflow: "hidden",
-                }}
-              >
-                <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 10, background: "rgba(0,0,0,0.06)" }} />
-                <div style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 10, background: "rgba(0,0,0,0.06)" }} />
-
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 12, letterSpacing: "0.1em", color: "#5B3A29" }}>CAFFEINE FACTS</div>
-                <div style={{ height: 1, background: "#1B2430", margin: "8px 0 14px" }} />
-
-                <div className="grid grid-cols-2 gap-y-4 gap-x-3">
-                  <Stat big={totalCups} label="cups logged" />
-                  <Stat big={`¥${totalSpend.toLocaleString()}`} label="total spent" />
-                  <Stat big={`${totalCaffeine}`} unit="mg" label="total caffeine" />
-                  <Stat big={`${(totalMl / 1000).toFixed(1)}`} unit="L" label="total volume" />
+              <div className="flex flex-col gap-4">
+                {/* Total consumption */}
+                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: 20 }}>
+                  <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>Total Consumption</div>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <span style={{ fontSize: 44, fontWeight: 800, color: C.primary, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>
+                      {totalCups}
+                    </span>
+                    <span style={{ fontSize: 20, fontWeight: 700 }}>Cups</span>
+                  </div>
                 </div>
 
-                <div style={{ height: 1, background: "#1B2430", margin: "14px 0" }} />
-
-                <div className="flex items-center gap-2 mb-1">
-                  <Flame size={14} color="#C1432B" />
-                  <span style={{ fontSize: 12 }}>
-                    Biggest day: <strong>{peakDay.cups > 0 ? `${fmtMonthLabel(wrappedMonth).split(" ")[0]} ${peakDay.day} (${peakDay.cups} cups)` : "—"}</strong>
-                  </span>
+                {/* Spent + Caffeine */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: 18 }}>
+                    <Wallet size={20} color={C.blue} />
+                    <div style={{ fontSize: 13, color: C.muted, marginTop: 8 }}>Total Spent</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>¥{totalSpend.toLocaleString()}</div>
+                  </div>
+                  <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: 18 }}>
+                    <Zap size={20} color={C.primary} />
+                    <div style={{ fontSize: 13, color: C.muted, marginTop: 8 }}>Caffeine</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>
+                      {(totalCaffeine / 1000).toFixed(1)}g{" "}
+                      {monthEntries.some((e) => e.caffeine_is_estimate) && (
+                        <span style={{ fontSize: 12, fontWeight: 600, color: C.muted }}>Est.</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
+
+                {/* Total volume */}
+                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: 18 }}>
+                  <div className="flex items-center gap-2" style={{ color: C.muted, fontSize: 13 }}>
+                    <Droplet size={16} color={C.blue} /> Total Volume
+                  </div>
+                  <div style={{ fontSize: 22, fontWeight: 800, marginTop: 6, fontVariantNumeric: "tabular-nums" }}>
+                    {(totalMl / 1000).toFixed(1)} L
+                  </div>
+                </div>
+
+                {/* Most frequented */}
                 {favoriteBrand && (
-                  <div className="flex items-center gap-2 mb-1">
-                    <Coffee size={14} color="#5B3A29" />
-                    <span style={{ fontSize: 12 }}>Favorite: <strong>{favoriteBrand[0]}</strong> ({favoriteBrand[1]}×)</span>
-                  </div>
-                )}
-                {totalCups > 0 && (
-                  <div className="flex items-center gap-2 mb-3" style={{ fontSize: 12 }}>
-                    <span style={{ width: 14, textAlign: "center" }}>¥</span>
-                    Avg per cup: <strong>¥{Math.round(totalSpend / totalCups).toLocaleString()}</strong>
+                  <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: 20 }}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <Star size={18} color={C.primary} fill={C.primary} />
+                      <span style={{ fontSize: 18, fontWeight: 700 }}>Most Frequented</span>
+                    </div>
+                    <div className="flex items-center justify-between" style={{ background: C.cell, borderRadius: 12, padding: "12px 16px" }}>
+                      <span style={{ fontSize: 16, fontWeight: 700 }}>{favoriteBrand[0]}</span>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 20, fontWeight: 800, color: C.primary, lineHeight: 1 }}>{favoriteBrand[1]}</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: C.muted, letterSpacing: "0.06em" }}>TIMES</div>
+                      </div>
+                    </div>
                   </div>
                 )}
 
-                <div style={{ height: 140, marginTop: 8 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={dayData}>
-                      <XAxis dataKey="day" tick={{ fontSize: 9, fill: "#5B3A29" }} interval={2} axisLine={{ stroke: "#5B3A29" }} tickLine={false} />
-                      <YAxis hide />
-                      <Tooltip cursor={{ fill: "rgba(0,0,0,0.05)" }} contentStyle={{ background: "#1B2430", border: "none", borderRadius: 8, fontSize: 11 }} labelStyle={{ color: "#F1E8D8" }} />
-                      <Bar dataKey="cups" radius={[3, 3, 0, 0]}>
-                        {dayData.map((d, i) => (
-                          <Cell key={i} fill={d.day === peakDay.day && peakDay.cups > 0 ? "#C1432B" : "#5B3A29"} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
+                {/* Weekly rhythm */}
+                <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: 20 }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Weekly Rhythm</div>
+                  <div style={{ height: 150 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={weekData}>
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+                        <YAxis hide />
+                        <Tooltip cursor={{ fill: "rgba(0,0,0,0.04)" }} contentStyle={{ background: C.text, border: "none", borderRadius: 8, fontSize: 11 }} labelStyle={{ color: "#fff" }} itemStyle={{ color: "#fff" }} />
+                        <Bar dataKey="cups" radius={[4, 4, 0, 0]}>
+                          {weekData.map((d, i) => (
+                            <Cell key={i} fill={d.label === peakWeekday.label && peakWeekday.cups > 0 ? C.primary : "#c9c7d1"} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  {peakWeekday.cups > 0 && (
+                    <div style={{ fontSize: 13, color: C.muted, textAlign: "center", marginTop: 8 }}>
+                      <strong style={{ color: C.text }}>{peakWeekday.label}</strong> is your peak caffeine day.
+                    </div>
+                  )}
                 </div>
-                <div style={{ fontSize: 9.5, color: "#8B95A1", textAlign: "center", marginTop: 4 }}>cups per day</div>
               </div>
             )}
           </div>
         )}
-      </div>
+      </main>
+
+      {/* Bottom nav */}
+      <nav
+        className="fixed bottom-0 left-0 w-full z-40 flex justify-around items-center"
+        style={{ background: C.bg, borderTop: `1px solid ${C.border}`, padding: "8px 12px", paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}
+      >
+        <NavItem active={tab === "log"} onClick={() => setTab("log")} icon={<Camera size={22} />} label="Log" />
+        <NavItem active={tab === "history"} onClick={() => setTab("history")} icon={<HistoryIcon size={22} />} label="History" />
+        <NavItem active={tab === "wrapped"} onClick={() => setTab("wrapped")} icon={<Sparkles size={22} />} label="Wrapped" />
+      </nav>
     </div>
+  );
+}
+
+function Bracket({ pos }: { pos: "tl" | "tr" | "bl" | "br" }) {
+  const base: React.CSSProperties = { position: "absolute", width: 26, height: 26, borderColor: C.primary, borderStyle: "solid", borderWidth: 0 };
+  const map: Record<string, React.CSSProperties> = {
+    tl: { top: 0, left: 0, borderTopWidth: 3, borderLeftWidth: 3, borderTopLeftRadius: 10 },
+    tr: { top: 0, right: 0, borderTopWidth: 3, borderRightWidth: 3, borderTopRightRadius: 10 },
+    bl: { bottom: 0, left: 0, borderBottomWidth: 3, borderLeftWidth: 3, borderBottomLeftRadius: 10 },
+    br: { bottom: 0, right: 0, borderBottomWidth: 3, borderRightWidth: 3, borderBottomRightRadius: 10 },
+  };
+  return <div style={{ ...base, ...map[pos] }} />;
+}
+
+function NavItem({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
+  return (
+    <button onClick={onClick} className="flex flex-col items-center gap-1" style={{ padding: "4px 18px", borderRadius: 14, background: active ? C.primaryFixed : "transparent", color: active ? C.primary : C.muted }}>
+      {icon}
+      <span style={{ fontSize: 11, fontWeight: 700 }}>{label}</span>
+    </button>
+  );
+}
+
+function TempButton({ active, onClick, icon, label, color, bg }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; color: string; bg: string }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex-1 flex items-center justify-center gap-1.5"
+      style={{
+        height: 40,
+        borderRadius: 10,
+        fontWeight: 700,
+        fontSize: 13,
+        background: active ? bg : C.card,
+        color: active ? color : C.muted,
+        border: `1px solid ${active ? bg : C.border}`,
+      }}
+    >
+      {icon} {label}
+    </button>
+  );
+}
+
+function TempChip({ temp }: { temp: "hot" | "cold" }) {
+  const hot = temp === "hot";
+  return (
+    <span
+      className="inline-flex items-center gap-1"
+      style={{
+        fontSize: 11,
+        fontWeight: 700,
+        padding: "2px 8px",
+        borderRadius: 999,
+        background: hot ? C.hotBg : C.coldBg,
+        color: hot ? C.hotText : C.coldText,
+      }}
+    >
+      {hot ? <Flame size={11} /> : <Snowflake size={11} />}
+      {hot ? "Hot" : "Cold"}
+    </span>
   );
 }
 
@@ -705,43 +934,32 @@ function Field({
 }) {
   return (
     <div>
-      <div style={{ fontSize: 10, color: "#5B3A29", fontWeight: 700, letterSpacing: "0.04em", marginBottom: 3 }}>{label.toUpperCase()}</div>
+      <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: "0.04em", marginBottom: 4 }}>{label.toUpperCase()}</div>
       <input
+        className="canlog-input"
         type={type}
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(type === "number" ? e.target.value.replace(/[^0-9]/g, "") : e.target.value)}
         style={{
           width: "100%",
-          background: "#fff",
-          border: "1px solid #d8cbb0",
-          borderRadius: 8,
-          padding: "7px 9px",
-          fontSize: 13,
-          fontFamily: type === "number" ? "'JetBrains Mono', monospace" : "inherit",
-          color: "#1B2430",
+          background: C.card,
+          border: `1px solid ${C.border}`,
+          borderRadius: 10,
+          padding: "9px 11px",
+          fontSize: 14,
+          color: C.text,
+          fontVariantNumeric: type === "number" ? "tabular-nums" : "normal",
         }}
       />
     </div>
   );
 }
 
-function Stat({ big, unit, label }: { big: React.ReactNode; unit?: string; label: string }) {
-  return (
-    <div>
-      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 26, lineHeight: 1 }}>
-        {big}
-        {unit && <span style={{ fontSize: 13, marginLeft: 3, fontWeight: 500 }}>{unit}</span>}
-      </div>
-      <div style={{ fontSize: 11, color: "#5B3A29", marginTop: 2 }}>{label}</div>
-    </div>
-  );
-}
-
 function EmptyState({ text }: { text: string }) {
   return (
-    <div style={{ textAlign: "center", padding: "40px 20px", color: "#8B95A1", fontSize: 13 }}>
-      <Coffee size={28} color="#465065" style={{ margin: "0 auto 10px" }} />
+    <div style={{ textAlign: "center", padding: "48px 20px", color: C.muted, fontSize: 14 }}>
+      <Coffee size={30} color="#c9c7d1" style={{ margin: "0 auto 12px" }} />
       {text}
     </div>
   );

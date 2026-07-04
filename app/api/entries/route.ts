@@ -20,7 +20,7 @@ export async function GET(req: Request) {
     const rows = await sql<Entry[]>`
       SELECT id, jan, brand, name, size_ml, calories, carbs_g, protein_g, fat_g,
              sodium_mg, caffeine_mg, caffeine_is_estimate, price_yen, image_url,
-             "timestamp"
+             temperature, "timestamp"
       FROM entries
       WHERE user_id = ${user}
       ORDER BY "timestamp" DESC
@@ -59,22 +59,23 @@ export async function POST(req: Request) {
       caffeine_is_estimate: !!d.caffeine_is_estimate,
       price_yen: num(d.price_yen),
       image_url: d.image_url || null,
+      temperature: d.temperature === "hot" || d.temperature === "cold" ? d.temperature : null,
       confidence: d.confidence || "manual",
     };
 
     const [row] = await sql<Entry[]>`
       INSERT INTO entries (
         user_id, jan, brand, name, size_ml, calories, carbs_g, protein_g, fat_g,
-        sodium_mg, caffeine_mg, caffeine_is_estimate, price_yen, image_url
+        sodium_mg, caffeine_mg, caffeine_is_estimate, price_yen, image_url, temperature
       ) VALUES (
         ${user}, ${jan}, ${entry.brand}, ${entry.name}, ${entry.size_ml},
         ${entry.calories}, ${entry.carbs_g}, ${entry.protein_g}, ${entry.fat_g},
         ${entry.sodium_mg}, ${entry.caffeine_mg}, ${entry.caffeine_is_estimate},
-        ${entry.price_yen}, ${entry.image_url}
+        ${entry.price_yen}, ${entry.image_url}, ${entry.temperature}
       )
       RETURNING id, jan, brand, name, size_ml, calories, carbs_g, protein_g, fat_g,
                 sodium_mg, caffeine_mg, caffeine_is_estimate, price_yen, image_url,
-                "timestamp"
+                temperature, "timestamp"
     `;
 
     // Upsert the shared product cache using the confirmed values. price_yen and

@@ -32,3 +32,6 @@ next-env.d.ts
 
 .vercel
 .env*.local
+
+# local design reference assets (Stitch export)
+/design/

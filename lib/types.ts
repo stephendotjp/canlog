@@ -65,5 +65,6 @@ export interface Entry {
   caffeine_is_estimate: boolean;
   price_yen: number;
   image_url: string | null;
+  temperature: "hot" | "cold" | null;
   timestamp: string;
 }

@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS entries (
   -- Always user-entered. Never cached, never AI-derived, never defaulted.
   price_yen           INTEGER,
   image_url           TEXT,
+  -- Per-log, user-chosen: 'hot' | 'cold' | NULL (unknown). Not part of the
+  -- shared product cache — the same can may be bought hot or cold.
+  temperature         TEXT,
   "timestamp"         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
