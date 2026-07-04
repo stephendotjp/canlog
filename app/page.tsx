@@ -35,10 +35,10 @@ const C = {
   primaryFixed: "#ffdad5",
   blue: "#0058bc",
   blueFixed: "#d8e2ff",
-  hotText: "#a33a0c",
-  hotBg: "#ffe1cc",
+  hotText: "#b3261e",
+  hotBg: "#ffdbd3",
   coldText: "#0058bc",
-  coldBg: "#d8e2ff",
+  coldBg: "#d3e3ff",
 };
 
 const QUICK_ITEMS = [
@@ -683,54 +683,55 @@ export default function CanLog() {
         {/* HISTORY TAB */}
         {tab === "history" && (
           <div>
-            <div className="flex items-center justify-between mb-5">
+            <div className="flex items-start justify-between mb-1">
               <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.02em" }}>History</h1>
-              <span style={{ fontSize: 12, fontWeight: 700, color: C.muted, background: C.cell, padding: "5px 12px", borderRadius: 999 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: C.muted, background: C.cell, padding: "6px 13px", borderRadius: 999, marginTop: 4 }}>
                 {history.length} Total
               </span>
             </div>
+            <p style={{ fontSize: 14, color: C.muted, marginBottom: 20 }}>Every can you&apos;ve logged.</p>
 
             {history.length === 0 && <EmptyState text="Nothing logged yet. Go scan a can." />}
 
             {historyGroups.map((group) => (
-              <div key={group.heading} className="mb-5">
-                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", color: C.muted, textTransform: "uppercase", marginBottom: 8 }}>
+              <div key={group.heading} className="mb-6">
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", color: C.muted, textTransform: "uppercase", marginBottom: 10 }}>
                   {group.heading}
                 </div>
-                <div className="flex flex-col gap-2.5">
+                <div className="flex flex-col gap-3">
                   {group.items.map((e) => (
                     <div
                       key={e.id}
-                      className="flex items-center gap-3"
-                      style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.border}`, padding: 12 }}
+                      className="flex gap-3.5"
+                      style={{ background: C.card, borderRadius: 16, border: `1px solid ${C.border}`, padding: 14 }}
                     >
                       {e.image_url ? (
-                        <img src={e.image_url} alt="" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover" }} />
+                        <img src={e.image_url} alt="" style={{ width: 64, height: 64, borderRadius: 12, objectFit: "cover", flexShrink: 0 }} />
                       ) : (
-                        <div style={{ width: 52, height: 52, borderRadius: 10, background: C.cell, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                          <Coffee size={20} color={C.primary} />
+                        <div style={{ width: 64, height: 64, borderRadius: 12, background: C.cell, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          <Coffee size={24} color={C.primary} />
                         </div>
                       )}
                       <div className="flex-1 min-w-0">
-                        <div style={{ fontSize: 12, fontWeight: 700, color: C.blue, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: C.blue, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                           {e.brand}
                         </div>
-                        <div style={{ fontSize: 15, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        <div style={{ fontSize: 19, fontWeight: 800, letterSpacing: "-0.01em", lineHeight: 1.15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                           {e.name}
                         </div>
-                        <div className="flex items-center gap-2" style={{ marginTop: 3 }}>
+                        <div className="flex items-center gap-2.5" style={{ marginTop: 8 }}>
                           {e.temperature && <TempChip temp={e.temperature} />}
                           {e.price_yen > 0 && (
-                            <span style={{ fontSize: 12.5, fontWeight: 700, color: C.primary }}>¥{e.price_yen}</span>
+                            <span style={{ fontSize: 15, fontWeight: 700, color: C.primary }}>¥{e.price_yen}</span>
                           )}
-                          <span style={{ fontSize: 11.5, color: C.muted }}>{e.size_ml}ml · {e.caffeine_mg}mg</span>
                         </div>
+                        <div style={{ fontSize: 11.5, color: C.muted, marginTop: 5 }}>{e.size_ml}ml · {e.caffeine_mg}mg caffeine</div>
                       </div>
-                      <div className="flex flex-col items-end gap-2">
-                        <span style={{ fontSize: 11.5, color: C.muted }}>
+                      <div className="flex flex-col items-end justify-between" style={{ flexShrink: 0 }}>
+                        <span style={{ fontSize: 13, fontWeight: 500, color: C.muted }}>
                           {new Date(e.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
                         </span>
-                        <button onClick={() => deleteEntry(e.id)} style={{ color: C.muted }}>
+                        <button onClick={() => deleteEntry(e.id)} style={{ color: "#c9c7d1" }} aria-label="Delete">
                           <Trash2 size={15} />
                         </button>
                       </div>
@@ -903,17 +904,15 @@ function TempChip({ temp }: { temp: "hot" | "cold" }) {
   const hot = temp === "hot";
   return (
     <span
-      className="inline-flex items-center gap-1"
       style={{
-        fontSize: 11,
+        fontSize: 12,
         fontWeight: 700,
-        padding: "2px 8px",
+        padding: "3px 11px",
         borderRadius: 999,
         background: hot ? C.hotBg : C.coldBg,
         color: hot ? C.hotText : C.coldText,
       }}
     >
-      {hot ? <Flame size={11} /> : <Snowflake size={11} />}
       {hot ? "Hot" : "Cold"}
     </span>
   );
