@@ -4,9 +4,14 @@ import type { BarcodeResult, LabelResult, LookupResult } from "./types";
 // Called ONLY from server-side API routes. The key never reaches the client.
 const anthropic = new Anthropic();
 
-// Per the rebuild spec. Sonnet keeps per-scan cost low on a vision-heavy app.
-// To use a stronger model, change this to "claude-opus-4-8".
-const MODEL = "claude-sonnet-4-6";
+// Model per call, chosen for cost:
+//   * Barcode read runs on EVERY scan and is simple digit OCR → cheap Haiku.
+//   * Label read only runs on a cache miss (first scan of a product), and the
+//     per-100g scaling / salt→sodium math benefits from a stronger model → Sonnet.
+//   * Name lookup uses Haiku and is hard-capped (see lookupNameByJan).
+const MODEL_BARCODE = "claude-haiku-4-5";
+const MODEL_LABEL = "claude-sonnet-4-6";
+const MODEL_LOOKUP = "claude-haiku-4-5";
 
 function parseJson<T>(text: string): T {
   const raw = text.replace(/```json|```/g, "").trim();
@@ -16,13 +21,14 @@ function parseJson<T>(text: string): T {
 type MediaType = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
 
 async function callClaudeVision<T>(
+  model: string,
   base64: string,
   mediaType: MediaType,
   prompt: string,
   maxTokens = 500
 ): Promise<T> {
   const res = await anthropic.messages.create({
-    model: MODEL,
+    model,
     max_tokens: maxTokens,
     messages: [
       {
@@ -50,7 +56,7 @@ Respond with ONLY raw JSON, no markdown fences:
 {"jan": string|null, "readable": boolean}
 
 If you cannot clearly read all the digits, set "jan" to null and "readable" to false. Do not guess digits you can't actually see.`;
-  return callClaudeVision<BarcodeResult>(base64, mediaType, prompt, 200);
+  return callClaudeVision<BarcodeResult>(MODEL_BARCODE, base64, mediaType, prompt, 150);
 }
 
 // Stage 2: fuller call — only runs on a cache miss. Reads the nutrition facts panel.
@@ -74,7 +80,7 @@ Critical rules — read carefully, these are common mistakes:
 
 6. confidence reflects overall label legibility, not the caffeine number specifically.
 7. notes: one short sentence on anything unclear, estimated, or scaled.`;
-  return callClaudeVision<LabelResult>(base64, mediaType, prompt, 800);
+  return callClaudeVision<LabelResult>(MODEL_LABEL, base64, mediaType, prompt, 600);
 }
 
 // Optional, user-triggered only (never automatic) — looks up the real product name
@@ -89,13 +95,13 @@ Respond with ONLY raw JSON, no markdown fences:
 If you can't confidently find this exact JAN code, set "found" to false and "name" to null rather than guessing a plausible-sounding name.`;
 
   const res = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 600,
+    model: MODEL_LOOKUP,
+    max_tokens: 400,
     messages: [{ role: "user", content: prompt }],
-    // Basic web-search variant supported by the installed SDK. If you upgrade
-    // @anthropic-ai/sdk, you can switch to "web_search_20260209" (dynamic
-    // filtering) on Sonnet 4.6 / Opus 4.6+.
-    tools: [{ type: "web_search_20250305", name: "web_search" }],
+    // Hard-capped web search: max 3 searches so this optional feature can never
+    // run away in cost. This step (reading web pages into the model) is the
+    // expensive part of the app, so it stays user-triggered AND bounded.
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
   });
   const text = res.content
     .filter((b): b is Anthropic.TextBlock => b.type === "text")

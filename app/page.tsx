@@ -59,13 +59,36 @@ function fmtMonthLabel(key: string) {
   return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
 
-async function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
+// Downscale the photo before sending. iPhone photos are ~3000-4000px; the model
+// resizes them anyway, so shrinking client-side cuts tokens, upload size, and cost
+// with no loss of barcode/label legibility at ~1000px.
+async function downscaleToBase64(
+  file: File,
+  maxDim = 1000
+): Promise<{ base64: string; mediaType: string }> {
+  const dataUrl: string = await new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve((reader.result as string).split(",")[1]);
+    reader.onload = () => resolve(reader.result as string);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = dataUrl;
+  });
+  const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return { base64: dataUrl.split(",")[1], mediaType: file.type || "image/jpeg" };
+  ctx.drawImage(img, 0, 0, w, h);
+  const out = canvas.toDataURL("image/jpeg", 0.82);
+  return { base64: out.split(",")[1], mediaType: "image/jpeg" };
 }
 
 // Postgres numeric columns come back as strings via postgres.js — coerce them.
@@ -140,8 +163,7 @@ export default function CanLog() {
     setDraft(null);
     setStage("barcode");
     try {
-      const base64 = await fileToBase64(file);
-      const mediaType = file.type || "image/jpeg";
+      const { base64, mediaType } = await downscaleToBase64(file);
       setLastBase64(base64);
       setLastMediaType(mediaType);
 
