@@ -6,7 +6,7 @@ import { loadEnv } from "./loadEnv";
 loadEnv();
 
 async function main() {
-  const url = process.env.DATABASE_URL;
+  const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
   if (!url) throw new Error("DATABASE_URL is not set.");
   const sql = postgres(url, { prepare: false });
   const schema = readFileSync(join(process.cwd(), "db", "schema.sql"), "utf8");

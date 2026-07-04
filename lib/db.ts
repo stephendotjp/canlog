@@ -8,7 +8,8 @@ declare global {
 }
 
 function makeClient() {
-  const url = process.env.DATABASE_URL;
+  // Accept either name — Vercel's Postgres/Neon integration may set POSTGRES_URL.
+  const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
   if (!url) {
     throw new Error(
       "DATABASE_URL is not set. Copy .env.example to .env.local and fill it in."
