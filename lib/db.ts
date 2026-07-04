@@ -22,7 +22,25 @@ function makeClient() {
   });
 }
 
-const sql = global._canlogSql ?? makeClient();
-if (process.env.NODE_ENV !== "production") global._canlogSql = sql;
+// Lazily create the client on first use. This keeps module import side-effect
+// free, so the build (which imports route modules but never runs queries) never
+// requires DATABASE_URL — only actual requests do.
+function getClient() {
+  if (!global._canlogSql) global._canlogSql = makeClient();
+  return global._canlogSql;
+}
+
+const sql = new Proxy(function () {} as unknown as ReturnType<typeof postgres>, {
+  apply(_target, _thisArg, args: unknown[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (getClient() as any)(...args);
+  },
+  get(_target, prop) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const client = getClient() as any;
+    const value = client[prop];
+    return typeof value === "function" ? value.bind(client) : value;
+  },
+});
 
 export default sql;
