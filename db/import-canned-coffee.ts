@@ -1,27 +1,23 @@
 // One-off importer for canned_coffee_japan_db.csv -> shared `products` cache.
 //
-// The CSV mixes two nutrition bases and the "Nutrition Basis" column is only
-// partially filled, so this importer loads ONLY the rows whose per-container
-// numbers are unambiguous:
-//
-//   1. Rows explicitly labeled "100g"      -> scale every value by size/100.
-//   2. Blank-basis rows that are black/near-zero coffee (energy < 8, no milk
-//      macros) -> basis is irrelevant (0 either way), store as-is.
-//
-// The ~124 blank-basis MILK rows are deliberately SKIPPED: their real basis is
-// per-100g for most brands but per-container for BOSS, and guessing on a shared
-// cache would poison it. They stay parked until the basis is confirmed.
+// The CSV (re-parsed from source scraps.hamanegi.com/cancoffeebook via items_raw.json)
+// resolves every row to a known nutrition basis and provides normalized per-100g
+// columns. CanLog stores PER-CONTAINER TOTALS, so we scale every value up by the
+// can volume: per_container = per_100g * (volume / 100).
 //
 // Conventions match lib/anthropic.ts + the entries route:
 //   * all stored values are PER-CONTAINER TOTALS
-//   * sodium_mg = salt_g * 1000 / 2.54
-//   * caffeine left NULL when the label omits it (the app estimates it)
+//   * sodium_mg = salt_g * 1000 / 2.54   (salt scaled to per-container first)
+//   * caffeine stored AS LABELED (not scaled): on cans the caffeine figure is a
+//     per-container "1本あたり" number even when the panel is per-100g. Absent -> NULL
+//     (the app estimates it).
 //   * confidence = "medium" (compiled data, not user-verified)
-//   * ON CONFLICT (jan) DO NOTHING — never clobbers a real user scan.
+//   * ON CONFLICT (jan) DO UPDATE ... WHERE confidence = 'medium' — refreshes our own
+//     prior bulk rows but NEVER clobbers a real user scan or higher-confidence data.
 //
 // Usage:
 //   npx tsx db/import-canned-coffee.ts            # dry run: report + JSON, no DB
-//   npx tsx db/import-canned-coffee.ts --commit   # upsert into the DB
+//   npx tsx db/import-canned-coffee.ts --commit   # upsert into the DB (needs creds)
 
 import { readFileSync, writeFileSync } from "node:fs";
 import postgres from "postgres";
@@ -48,16 +44,12 @@ interface Product {
 // --- CSV parsing (handles quoted fields with embedded commas/newlines) --------
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
-  let field = "";
-  let row: string[] = [];
-  let inQuotes = false;
+  let field = "", row: string[] = [], inQuotes = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }
-        else inQuotes = false;
-      } else field += c;
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
     } else if (c === '"') inQuotes = true;
     else if (c === ",") { row.push(field); field = ""; }
     else if (c === "\r") { /* ignore */ }
@@ -68,95 +60,83 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
-// A value may be a single number, a range "0-1.4", or noise like "約60"/"00.8".
-// Collapse ranges to their midpoint; strip non-numeric characters otherwise.
+// Single number, or a range "0-1.4" -> midpoint. Strips stray non-numeric chars.
 function toNumber(raw: string): number | null {
   const v = (raw || "").trim();
   if (!v) return null;
   const parts = v.split("-").map((p) => p.replace(/[^0-9.]/g, "")).filter((p) => p !== "" && p !== ".");
-  if (parts.length === 0) return null;
+  if (!parts.length) return null;
   const nums = parts.map(Number).filter((n) => !Number.isNaN(n));
-  if (nums.length === 0) return null;
-  return nums.reduce((a, b) => a + b, 0) / nums.length;
+  return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
 }
 
-function toSizeMl(raw: string): number | null {
+const toSizeMl = (raw: string): number | null => {
   const m = (raw || "").match(/(\d+)/);
   return m ? parseInt(m[1], 10) : null;
-}
-
+};
 const round = (n: number | null, dp: number): number | null =>
   n == null ? null : Math.round(n * 10 ** dp) / 10 ** dp;
 
 function main() {
   const rows = parseCsv(readFileSync(CSV_PATH, "utf8"));
   const header = rows[0].map((h) => h.trim());
-  const col = (name: string) => header.indexOf(name);
+  const c = (name: string) => {
+    const i = header.indexOf(name);
+    if (i === -1) throw new Error(`missing column: ${name}`);
+    return i;
+  };
   const idx = {
-    brand: col("Brand"),
-    name: col("Product Name (Japanese)"),
-    jan: col("JAN Code"),
-    volume: col("Volume"),
-    basis: col("Nutrition Basis"),
-    energy: col("Energy (kcal)"),
-    protein: col("Protein (g)"),
-    fat: col("Fat (g)"),
-    carb: col("Carbohydrate (g)"),
-    salt: col("Salt Equivalent (g)"),
-    caffeine: col("Caffeine (mg)"),
+    brand: c("Brand"),
+    name: c("Product Name (Japanese)"),
+    jan: c("JAN Code"),
+    volume: c("Volume"),
+    basis: c("Basis Type"),
+    energy: c("Energy per 100g (kcal)"),
+    protein: c("Protein per 100g (g)"),
+    fat: c("Fat per 100g (g)"),
+    carb: c("Carbohydrate per 100g (g)"),
+    salt: c("Salt per 100g (g)"),
+    caffeine: c("Caffeine as labeled (mg)"),
   };
 
   const loaded: Product[] = [];
-  const seenJan = new Set<string>();
-  const skipped = { ambiguous: 0, dupe: 0, badJan: 0 };
+  const seen = new Set<string>();
+  const badJans: string[] = [];
+  const skipped = { badJan: 0, dupe: 0, noVolume: 0 };
 
   for (let r = 1; r < rows.length; r++) {
     const cells = rows[r];
     if (!cells || cells.length < header.length) continue;
-    const jan = (cells[idx.jan] || "").trim();
-    if (!/^\d{13}$/.test(jan)) { skipped.badJan++; continue; }
+    // Strip stray non-digits (trailing mojibake bytes etc.). A clean JAN is 13
+    // digits; anything else (e.g. the 14-digit source typo) is flagged, not guessed.
+    const rawJan = (cells[idx.jan] || "").trim();
+    const jan = rawJan.replace(/\D/g, "");
+    if (jan.length !== 13) { skipped.badJan++; badJans.push(rawJan); continue; }
+    if (seen.has(jan)) { skipped.dupe++; continue; }
 
-    const basis = (cells[idx.basis] || "").trim();
     const size = toSizeMl(cells[idx.volume]);
-    const energy = toNumber(cells[idx.energy]);
-    const protein = toNumber(cells[idx.protein]);
-    const fat = toNumber(cells[idx.fat]);
-    const carb = toNumber(cells[idx.carb]);
+    if (!size) { skipped.noVolume++; continue; }
+    const s = size / 100; // per-100g -> per-container multiplier
+
     const salt = toNumber(cells[idx.salt]);
     const caffeine = toNumber(cells[idx.caffeine]);
+    const scale = (col: number) => {
+      const n = toNumber(cells[col]);
+      return n == null ? null : n * s;
+    };
 
-    const isBlack =
-      (energy ?? 0) < 8 && (fat ?? 0) < 1 && (protein ?? 0) < 1 && (carb ?? 0) < 2;
-
-    let scale: number; // multiplier to reach per-container totals
-    if (basis === "100g") {
-      if (!size) { skipped.ambiguous++; continue; }
-      scale = size / 100;
-    } else if (isBlack) {
-      scale = 1; // near-zero: basis irrelevant
-    } else {
-      skipped.ambiguous++; // blank-basis milk row — hold it
-      continue;
-    }
-
-    if (seenJan.has(jan)) { skipped.dupe++; continue; }
-    seenJan.add(jan);
-
-    const sodium = salt == null ? null : (salt * scale) * 1000 / 2.54;
-
+    seen.add(jan);
     loaded.push({
       jan,
       brand: (cells[idx.brand] || "").trim(),
       name: (cells[idx.name] || "").trim().replace(/\s+/g, " "),
       size_ml: size,
-      calories: round(energy == null ? null : energy * scale, 0),
-      carbs_g: round(carb == null ? null : carb * scale, 1),
-      protein_g: round(protein == null ? null : protein * scale, 1),
-      fat_g: round(fat == null ? null : fat * scale, 1),
-      sodium_mg: round(sodium, 0),
-      // Caffeine is stored as-is (not scaled): the CSV's caffeine figures read as
-      // per-container even on 100g-basis rows. Present -> trusted; absent -> app estimates.
-      caffeine_mg: caffeine,
+      calories: round(scale(idx.energy), 0),
+      carbs_g: round(scale(idx.carb), 1),
+      protein_g: round(scale(idx.protein), 1),
+      fat_g: round(scale(idx.fat), 1),
+      sodium_mg: round(salt == null ? null : salt * s * 1000 / 2.54, 0),
+      caffeine_mg: caffeine, // as labeled, not scaled
       caffeine_is_estimate: caffeine == null,
       confidence: "medium",
     });
@@ -164,21 +144,28 @@ function main() {
 
   writeFileSync(OUT_JSON, JSON.stringify(loaded, null, 2), "utf8");
 
+  const byBasis = new Map<string, number>();
+  for (let r = 1; r < rows.length; r++) {
+    const b = (rows[r][idx.basis] || "?").trim();
+    byBasis.set(b, (byBasis.get(b) || 0) + 1);
+  }
   console.log(`\n=== canned-coffee import ===`);
-  console.log(`Loading:  ${loaded.length} rows`);
-  console.log(`Skipped:  ${skipped.ambiguous} ambiguous milk (held), ${skipped.dupe} duplicate JAN, ${skipped.badJan} bad JAN`);
-  console.log(`Wrote normalized rows -> ${OUT_JSON}`);
+  console.log(`Loading:  ${loaded.length} rows  (basis in source: ${[...byBasis].map(([k, v]) => `${v} ${k}`).join(", ")})`);
+  console.log(`Skipped:  ${skipped.dupe} dup JAN, ${skipped.badJan} bad JAN, ${skipped.noVolume} no volume`);
+  if (badJans.length) console.log(`  bad JANs (need real barcode from can): ${badJans.map((j) => JSON.stringify(j)).join(", ")}`);
+  console.log(`Wrote -> ${OUT_JSON}`);
 
-  console.log(`\nSpot-checks (verify against a real can):`);
+  console.log(`\nSpot-checks (per-container):`);
   const show = (jan: string, label: string) => {
     const p = loaded.find((x) => x.jan === jan);
-    if (p) console.log(`  ${label}: ${p.size_ml}ml  ${p.calories}kcal  carb ${p.carbs_g}g  Na ${p.sodium_mg}mg  caf ${p.caffeine_mg ?? "—"}`);
-    else console.log(`  ${label}: (held / not loaded)`);
+    console.log(p
+      ? `  ${label}: ${p.size_ml}ml  ${p.calories}kcal  carb ${p.carbs_g}g  Na ${p.sodium_mg}mg  caf ${p.caffeine_mg ?? "—"}`
+      : `  ${label}: (not found)`);
   };
-  show("4901777344006", "BOSS Rainbow Mtn Bitter (100g basis, 185g)");
-  show("4901777204980", "BOSS Black (100g basis, 185g)");
-  show("4902102147323", "Georgia Black (black, blank basis)");
-  show("4901201144561", "UCC Black Rich (black, no kcal)");
+  show("4901777344006", "BOSS Rainbow Bitter (per-100g)");
+  show("4901777394148", "BOSS Caffeine200 (per-container)");
+  show("4902102139311", "Georgia Kaoru Black (per-100ml)");
+  show("4904910239801", "DyDo Blend Original (was held)");
 
   return { loaded, commit: process.argv.includes("--commit") };
 }
@@ -188,22 +175,29 @@ async function commit(loaded: Product[]) {
   const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
   if (!url) throw new Error("DATABASE_URL is not set (needed for --commit).");
   const sql = postgres(url, { prepare: false });
-  let inserted = 0;
+  let changed = 0;
   for (const p of loaded) {
     const res = await sql`
       INSERT INTO products (
         jan, brand, name, size_ml, calories, carbs_g, protein_g, fat_g,
-        sodium_mg, caffeine_mg, caffeine_is_estimate, confidence
+        sodium_mg, caffeine_mg, caffeine_is_estimate, confidence, updated_at
       ) VALUES (
         ${p.jan}, ${p.brand}, ${p.name}, ${p.size_ml}, ${p.calories}, ${p.carbs_g},
         ${p.protein_g}, ${p.fat_g}, ${p.sodium_mg}, ${p.caffeine_mg},
-        ${p.caffeine_is_estimate}, ${p.confidence}
+        ${p.caffeine_is_estimate}, ${p.confidence}, now()
       )
-      ON CONFLICT (jan) DO NOTHING
+      ON CONFLICT (jan) DO UPDATE SET
+        brand = EXCLUDED.brand, name = EXCLUDED.name, size_ml = EXCLUDED.size_ml,
+        calories = EXCLUDED.calories, carbs_g = EXCLUDED.carbs_g,
+        protein_g = EXCLUDED.protein_g, fat_g = EXCLUDED.fat_g,
+        sodium_mg = EXCLUDED.sodium_mg, caffeine_mg = EXCLUDED.caffeine_mg,
+        caffeine_is_estimate = EXCLUDED.caffeine_is_estimate,
+        confidence = EXCLUDED.confidence, updated_at = now()
+      WHERE products.confidence = 'medium'
     `;
-    inserted += res.count;
+    changed += res.count;
   }
-  console.log(`\n✓ inserted ${inserted} new product(s) (existing JANs left untouched)`);
+  console.log(`\n✓ inserted/updated ${changed} bulk row(s) (user/high-confidence rows untouched)`);
   await sql.end();
 }
 
